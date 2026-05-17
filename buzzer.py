@@ -1,6 +1,8 @@
-import os
 import asyncio
 import time
+import logging
+import os
+
 BUZZER_PIN = 17
 
 _line_request = None
@@ -46,30 +48,27 @@ async def async_beep(duration=0.1, duty_cycle=1.0):
     except Exception:
         set_buzzer(0)
 
-async def play_r2d2_chatter(duration=10):
-    for i in range(6):
-        await async_beep(0.2, duty_cycle=1.0)
-        await asyncio.sleep(2.0)
-
-async def play_start_scan():
-
+async def play_scan_beep():
+    """Plays a single beep for each scan."""
+    logging.info("Buzzer: Scan Beep")
     await async_beep(0.1, duty_cycle=1.0)
 
+
+async def play_start_scan():
+    """1 loud beep for starting a scan."""
+    logging.info("Buzzer: Start Scan (1 loud beep)")
+    await async_beep(0.4, duty_cycle=1.0)
+
+
 async def play_finish_scan():
-    await async_beep(0.12, duty_cycle=1.0)
-    await asyncio.sleep(0.1)
-    await async_beep(0.06, duty_cycle=1.0)
-    await asyncio.sleep(0.06)
-    await async_beep(0.06, duty_cycle=1.0)
-    await asyncio.sleep(0.1)
-    await async_beep(0.12, duty_cycle=1.0)
-    await asyncio.sleep(0.1)
-    await async_beep(0.12, duty_cycle=1.0)
-    
-    await asyncio.sleep(0.35)
-    await async_beep(0.12, duty_cycle=1.0)
-    await asyncio.sleep(0.15)
-    await async_beep(0.18, duty_cycle=1.0)
+    """3 fast beeps for finishing a scan."""
+    logging.info("Buzzer: Finish Scan (3 fast beeps)")
+    for _ in range(3):
+        await async_beep(0.07, duty_cycle=1.0)
+        await asyncio.sleep(0.07)
+
+
+
 
 async def play_error():
     for _ in range(3):
