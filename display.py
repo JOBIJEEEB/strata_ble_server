@@ -37,7 +37,7 @@ def initialize_display():
 
 def update_system_stats(battery, cpu_temp, cpu_load):
     send_nextion_command(f't0.txt="{battery}%"')
-    send_nextion_command(f't1.txt="{cpu_temp}°C"')
+    send_nextion_command(f't1.txt="{cpu_temp}Â°C"')
     send_nextion_command(f't2.txt="{cpu_load}%"')
 
 _last_bt_status = None
@@ -103,5 +103,25 @@ def show_shutdown_page():
     send_nextion_command('page sd_2')
     # Optional: Turn off the backlight after a short delay to "turn off" the screen
     # send_nextion_command('dim=0') 
+
+def show_raw_scan_results(data, is_healthy):
+    send_nextion_command('page raw_scan')
+    
+    # Update parameters
+    send_nextion_command(f'n.txt="{data.get("nitrogen", 0)}"')
+    send_nextion_command(f'p.txt="{data.get("phosphorus", 0)}"')
+    send_nextion_command(f'k.txt="{data.get("potassium", 0)}"')
+    send_nextion_command(f'm.txt="{data.get("moisture", 0)}%"')
+    send_nextion_command(f'ph.txt="{data.get("ph", 0)}"')
+    send_nextion_command(f't.txt="{data.get("temp", 0)}"')
+    send_nextion_command(f'ec.txt="{data.get("ec", 0)}"')
+    
+    # Update status banner (bco 2016 = green, 63488 = red)
+    if is_healthy:
+        send_nextion_command('status.txt="Healthy"')
+        send_nextion_command('status.bco=2016')
+    else:
+        send_nextion_command('status.txt="Unhealthy"')
+        send_nextion_command('status.bco=63488')
 
 initialize_display()
