@@ -24,6 +24,8 @@ def initialize_display():
     
     # Force go to main page
     send_nextion_command('page page0')
+    import time
+    time.sleep(0.1)
     
     # Set default stats placeholders
     send_nextion_command('t0.txt="---"')
@@ -37,7 +39,7 @@ def initialize_display():
 
 def update_system_stats(battery, cpu_temp, cpu_load):
     send_nextion_command(f't0.txt="{battery}%"')
-    send_nextion_command(f't1.txt="{cpu_temp}Â°C"')
+    send_nextion_command(f't1.txt="{cpu_temp}°C"')
     send_nextion_command(f't2.txt="{cpu_load}%"')
 
 _last_bt_status = None
@@ -90,6 +92,8 @@ def show_scanning_page():
 
 def show_main_page():
     send_nextion_command('page page0')
+    import time
+    time.sleep(0.1)
     global _last_bt_status, _resend_counter
     _last_bt_status = None
     _resend_counter = 0
@@ -106,6 +110,9 @@ def show_shutdown_page():
 
 def show_raw_scan_results(data, is_healthy):
     send_nextion_command('page raw_scan')
+    
+    import time
+    time.sleep(0.1)
     
     # Update parameters
     send_nextion_command(f'n.txt="{data.get("nitrogen", 0)}"')

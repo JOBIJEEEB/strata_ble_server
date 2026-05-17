@@ -5,7 +5,7 @@ import os
 scan_button = None
 try:
     from gpiozero import Button
-    scan_button = Button(11, pull_up=False, bounce_time=0.1)
+    scan_button = Button(11, pull_up=True, bounce_time=0.1)
 except ImportError:
     logging.warning("gpiozero not found. Physical button will not work unless on Pi.")
 except Exception as e:

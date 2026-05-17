@@ -33,7 +33,8 @@ import minimalmodbus
 # Configure logging at the very top before other local imports
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    force=True
 )
 
 import display
@@ -494,7 +495,7 @@ class StrataBLEServer:
         logging.info("Initiating Offline Scan (Physical Button)...")
         
         # 1. UI feedback
-        display.show_gathering_data()
+        display.show_scanning_page()
         
         # 2. Perform 10 scans (2s interval)
         data = await self._perform_averaged_scan(num_scans=10, interval=2.0)
