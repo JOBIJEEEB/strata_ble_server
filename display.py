@@ -116,13 +116,13 @@ def show_raw_scan_results(data, is_healthy):
     time.sleep(0.1)
     
     # Update parameters
-    send_nextion_command(f'n.txt="{data.get("nitrogen", 0)}"')
-    send_nextion_command(f'p.txt="{data.get("phosphorus", 0)}"')
-    send_nextion_command(f'k.txt="{data.get("potassium", 0)}"')
-    send_nextion_command(f'm.txt="{data.get("moisture", 0)}%"')
-    send_nextion_command(f'ph.txt="{data.get("ph", 0)}"')
-    send_nextion_command(f't.txt="{data.get("temp", 0)}"')
-    send_nextion_command(f'ec.txt="{data.get("ec", 0)}"')
+    send_nextion_command(f'n.txt="{data.get("nitrogen",   0)} mg/kg"')
+    send_nextion_command(f'p.txt="{data.get("phosphorus", 0)} mg/kg"')
+    send_nextion_command(f'k.txt="{data.get("potassium",  0)} mg/kg"')
+    send_nextion_command(f'm.txt="{data.get("moisture",   0)}%"')
+    send_nextion_command(f'ph.txt="{data.get("ph",        0)}"')
+    send_nextion_command(f't.txt="{data.get("temp",       0)}°C"')
+    send_nextion_command(f'ec.txt="{data.get("ec",        0)} µS/cm"')
     
     # Update status banner (bco 2016 = green, 63488 = red)
     if is_healthy:

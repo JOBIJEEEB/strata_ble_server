@@ -380,32 +380,59 @@ class StrataBLEServer:
                 features = [[n_val, p_val, k_val, t_val, m_val, ph_val, ec_val, soil_encoded]]
 
                 # --- Pre-flight: physical impossibility checks ---
-                # Each rule is independently sufficient to veto the scan.
-                # These values cannot appear in real soil — they indicate sensor failure.
-                invalid_reasons = []
-                if ec_val == 0.0:
-                    invalid_reasons.append("EC=0 (sensor not reading)")
-                if ph_val < 3.0:  # pH 0-2.9 is physically impossible for soil
-                    invalid_reasons.append(f"pH={ph_val} (below minimum 3.0 - sensor error)")
-                if n_val == 0.0 and p_val == 0.0 and k_val == 0.0:
-                    invalid_reasons.append("NPK all zero")
-                if t_val < 5.0:  # <5°C unrealistic for agricultural soil
-                    invalid_reasons.append(f"Temp={t_val}C (below minimum 5C - sensor error)")
+                # --- Pre-flight checks ---
+                # Path A: Empty soil reading — NPK, EC, and Moisture all zero.
+                #         Sensor is likely not inserted or chamber is empty.
+                #         Skip ML, go straight to rehab with watering guidance.
+                empty_reading = (
+                    n_val == 0.0 and p_val == 0.0 and k_val == 0.0
+                    and ec_val == 0.0 and m_val == 0.0
+                )
 
-                sensor_data_invalid = len(invalid_reasons) > 0
+                # Path B: Hard sensor error — physically impossible values.
+                hard_error_reasons = []
+                if ph_val < 3.0:
+                    hard_error_reasons.append(f"pH={ph_val} (below minimum 3.0 — sensor error)")
+                if t_val < 5.0:
+                    hard_error_reasons.append(f"Temp={t_val}°C (below minimum 5°C — sensor error)")
 
-                if sensor_data_invalid:
-                    logging.warning(f"Sensor data invalid: {'; '.join(invalid_reasons)}. Skipping ML prediction.")
+                if empty_reading:
+                    logging.warning("Empty soil reading: NPK, EC, and Moisture all zero. No rehab shown.")
                     output_dict = {
                         "crops": [],
                         "has_crop_match": False,
                         "soil_type": "any",
-                        "ml_flags": ["Invalid Sensor Data"],
+                        "ml_flags": ["No nutrients detected"],
+                        "ml_subtext": "No soil readings were detected. Make sure the sensor probe is fully inserted into the soil and that the soil chamber contains enough sample before rescanning.",
                         "ml_deficiencies": {},
-                        "rehab": ["IMO"]
+                        "rehab": []
                     }
                     ml_json = json.dumps(output_dict)
-                    logging.info(f"ML Output (invalid sensor): {ml_json}")
+                    logging.info(f"ML Output (empty reading): {ml_json}")
+                    self.update_char(SOIL_PH_UUID,        data["ph"])
+                    self.update_char(SOIL_MOISTURE_UUID,  data["moisture"])
+                    self.update_char(SOIL_TEMP_UUID,      data["temp"])
+                    self.update_char(EC_LEVEL_UUID,       data["ec"])
+                    self.update_char(NITROGEN_UUID,       data["nitrogen"])
+                    self.update_char(PHOSPHORUS_UUID,     data["phosphorus"])
+                    self.update_char(POTASSIUM_UUID,      data["potassium"])
+                    self.update_char(ML_OUTPUT_UUID,      ml_json)
+                    display.show_scan_done_page()
+                    return
+
+                if hard_error_reasons:
+                    logging.warning(f"Hard sensor error: {'; '.join(hard_error_reasons)}. Skipping ML prediction.")
+                    output_dict = {
+                        "crops": [],
+                        "has_crop_match": False,
+                        "soil_type": "any",
+                        "ml_flags": ["No nutrients detected"],
+                        "ml_subtext": "No soil readings were detected. Make sure the sensor probe is fully inserted into the soil and that the soil chamber contains enough sample before rescanning.",
+                        "ml_deficiencies": {},
+                        "rehab": ["WATER", "IMO"]
+                    }
+                    ml_json = json.dumps(output_dict)
+                    logging.info(f"ML Output (hard sensor error): {ml_json}")
                     self.update_char(SOIL_PH_UUID,        data["ph"])
                     self.update_char(SOIL_MOISTURE_UUID,  data["moisture"])
                     self.update_char(SOIL_TEMP_UUID,      data["temp"])
@@ -453,10 +480,16 @@ class StrataBLEServer:
                     if ec_val < ec_opt_low: ml_flags.append("Low EC")
                     elif ec_val > ec_opt_high: ml_flags.append("High EC")
                     
+                    m_opt_low = thresholds.get('soil_moisture', {}).get('optimal_low', 15.19)
+                    m_opt_high = thresholds.get('soil_moisture', {}).get('optimal_high', 57.55)
+                    if m_val < m_opt_low: ml_flags.append("Dry Soil")
+                    elif m_val > m_opt_high: ml_flags.append("Waterlogged Soil")
+                    
                     if 'N' in ml_deficiencies: rehab.append("FPJ")
                     if 'P' in ml_deficiencies: rehab.append("CalPhos")
                     if 'K' in ml_deficiencies: rehab.append("FFJ")
-                    if ml_flags: rehab.append("LABS")
+                    if any(f in ml_flags for f in ("High Acidity", "High Alkalinity", "Low EC", "High EC")): rehab.append("LABS")
+                    if "Dry Soil" in ml_flags: rehab.append("WATER")
                     if not rehab: rehab.append("IMO")
                 
                 output_dict = {
@@ -544,48 +577,38 @@ class StrataBLEServer:
         # 2. Perform 10 scans (2s interval)
         data = await self._perform_averaged_scan(num_scans=10, interval=2.0)
         
-        # 3. Predict health using ML — crop match drives the decision
+        # 3. Predict health using ML — same pre-flight logic as perform_soil_scan
         is_healthy = False
         if model_bundle is not None:
             try:
                 le_soil = model_bundle['le_soil']
                 rfc = model_bundle['model']
-                confidence_floor = model_bundle.get('crop_confidence_floor', 0.1)
-                
+
                 soil_encoded = le_soil.transform(['any'])[0]
-                n_val = float(data.get("nitrogen", 0)) if data.get("nitrogen") != "Err" else 0.0
-                p_val = float(data.get("phosphorus", 0)) if data.get("phosphorus") != "Err" else 0.0
-                k_val = float(data.get("potassium", 0)) if data.get("potassium") != "Err" else 0.0
-                t_val = float(data.get("temp", 0)) if data.get("temp") != "Err" else 0.0
-                m_val = float(data.get("moisture", 0)) if data.get("moisture") != "Err" else 0.0
-                ph_val = float(data.get("ph", 0)) if data.get("ph") != "Err" else 0.0
-                ec_val = float(data.get("ec", 0)) if data.get("ec") != "Err" else 0.0
-                
-                # --- Pre-flight: physical impossibility checks ---
-                # Each rule is independently sufficient to veto the scan.
-                # These values cannot appear in real soil — they indicate sensor failure.
-                invalid_reasons = []
-                if ec_val == 0.0:
-                    invalid_reasons.append("EC=0 (sensor not reading)")
-                if ph_val < 3.0:  # pH 0-2.9 is physically impossible for soil
-                    invalid_reasons.append(f"pH={ph_val} (below minimum 3.0 - sensor error)")
-                if n_val == 0.0 and p_val == 0.0 and k_val == 0.0:
-                    invalid_reasons.append("NPK all zero")
-                if t_val < 5.0:  # <5°C unrealistic for agricultural soil
-                    invalid_reasons.append(f"Temp={t_val}C (below minimum 5C - sensor error)")
+                n_val  = float(data.get("nitrogen",   0)) if data.get("nitrogen")   != "Err" else 0.0
+                p_val  = float(data.get("phosphorus", 0)) if data.get("phosphorus") != "Err" else 0.0
+                k_val  = float(data.get("potassium",  0)) if data.get("potassium")  != "Err" else 0.0
+                t_val  = float(data.get("temp",       0)) if data.get("temp")       != "Err" else 0.0
+                m_val  = float(data.get("moisture",   0)) if data.get("moisture")   != "Err" else 0.0
+                ph_val = float(data.get("ph",         0)) if data.get("ph")         != "Err" else 0.0
+                ec_val = float(data.get("ec",         0)) if data.get("ec")         != "Err" else 0.0
 
-                sensor_data_invalid = len(invalid_reasons) > 0
+                # Path A — empty reading: NPK + EC + Moisture all zero → sensor not inserted
+                empty_reading = (n_val == 0.0 and p_val == 0.0 and k_val == 0.0
+                                 and ec_val == 0.0 and m_val == 0.0)
 
-                if sensor_data_invalid:
-                    logging.warning(f"Offline scan: sensor data invalid: {'; '.join(invalid_reasons)}. Marking as unhealthy.")
+                # Path B — hard sensor error: physically impossible values
+                hard_error = ph_val < 3.0 or t_val < 5.0
+
+                if empty_reading or hard_error:
+                    logging.warning(f"Offline scan: sensor data invalid (empty={empty_reading}, hard_error={hard_error}). Marking as unhealthy.")
                     is_healthy = False
                 else:
                     features = [[n_val, p_val, k_val, t_val, m_val, ph_val, ec_val, soil_encoded]]
                     probas = rfc.predict_proba(features)[0]
                     top5 = np.argsort(probas)[::-1][:5]
-                    
-                    # Healthy = model ran successfully and returned predictions
-                    is_healthy = len(top5) > 0
+                    # Healthy = model ran and top crop has any probability
+                    is_healthy = len(top5) > 0 and float(probas[top5[0]]) > 0.0
             except Exception as e:
                 logging.error(f"Offline ML Prediction failed: {e}")
         
@@ -700,9 +723,9 @@ async def main():
 
     await server.setup()
 
-    diag_task = loop.create_task(server.periodic_system_update())
+    diag_task     = loop.create_task(server.periodic_system_update())
     shutdown_task = loop.create_task(server.monitor_display_commands())
-    button_task = loop.create_task(server.monitor_physical_button())
+    button_task   = loop.create_task(server.monitor_physical_button())
 
     # --- SIGTERM handler (covers J2 jumper, `sudo shutdown`, `systemctl stop`, etc.) ---
     def _on_sigterm():
