@@ -15,12 +15,14 @@ except Exception as e:
 async def wait_for_press():
     if scan_button is None:
         await asyncio.sleep(3600)
-        return False
+        return 0.0
         
     while True:
         if scan_button.is_pressed:
+            start_time = asyncio.get_event_loop().time()
             # Wait for release to avoid multiple triggers
             while scan_button.is_pressed:
-                await asyncio.sleep(0.1)
-            return True
-        await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
+            duration = asyncio.get_event_loop().time() - start_time
+            return duration
+        await asyncio.sleep(0.05)

@@ -13,7 +13,7 @@ import numpy as np
 
 # Load ML model bundle
 import joblib
-MODEL_PATH = '/home/strata/strata/kaggle_and_strato_model_pruned.pkl'
+MODEL_PATH = '/home/strata/strata/STRATA_FINAL_FINAL3.pkl'
 model_bundle = None
 try:
     model_bundle = joblib.load(MODEL_PATH)
@@ -363,6 +363,7 @@ class StrataBLEServer:
                 le_crop = model_bundle['le_crop']
                 rfc = model_bundle['model']
                 thresholds = model_bundle.get('thresholds', {})
+                tier_map = model_bundle.get('tier_map', {1: 'OPTIMAL', 2: 'OPTIMAL', 3: 'HIGHLY SUITABLE', 4: 'SUITABLE', 5: 'SUITABLE'})
                 
                 # Default "any" encoded value for soil type
                 soil_encoded = le_soil.transform(['any'])[0]
@@ -377,20 +378,62 @@ class StrataBLEServer:
                 ec_val = float(data.get("ec", 0)) if data.get("ec") != "Err" else 0.0
                 
                 features = [[n_val, p_val, k_val, t_val, m_val, ph_val, ec_val, soil_encoded]]
-                
-                # Predict
+
+                # --- Pre-flight: physical impossibility checks ---
+                # Each rule is independently sufficient to veto the scan.
+                # These values cannot appear in real soil — they indicate sensor failure.
+                invalid_reasons = []
+                if ec_val == 0.0:
+                    invalid_reasons.append("EC=0 (sensor not reading)")
+                if ph_val < 3.0:  # pH 0-2.9 is physically impossible for soil
+                    invalid_reasons.append(f"pH={ph_val} (below minimum 3.0 - sensor error)")
+                if n_val == 0.0 and p_val == 0.0 and k_val == 0.0:
+                    invalid_reasons.append("NPK all zero")
+                if t_val < 5.0:  # <5°C unrealistic for agricultural soil
+                    invalid_reasons.append(f"Temp={t_val}C (below minimum 5C - sensor error)")
+
+                sensor_data_invalid = len(invalid_reasons) > 0
+
+                if sensor_data_invalid:
+                    logging.warning(f"Sensor data invalid: {'; '.join(invalid_reasons)}. Skipping ML prediction.")
+                    output_dict = {
+                        "crops": [],
+                        "has_crop_match": False,
+                        "soil_type": "any",
+                        "ml_flags": ["Invalid Sensor Data"],
+                        "ml_deficiencies": {},
+                        "rehab": ["IMO"]
+                    }
+                    ml_json = json.dumps(output_dict)
+                    logging.info(f"ML Output (invalid sensor): {ml_json}")
+                    self.update_char(SOIL_PH_UUID,        data["ph"])
+                    self.update_char(SOIL_MOISTURE_UUID,  data["moisture"])
+                    self.update_char(SOIL_TEMP_UUID,      data["temp"])
+                    self.update_char(EC_LEVEL_UUID,       data["ec"])
+                    self.update_char(NITROGEN_UUID,       data["nitrogen"])
+                    self.update_char(PHOSPHORUS_UUID,     data["phosphorus"])
+                    self.update_char(POTASSIUM_UUID,      data["potassium"])
+                    self.update_char(ML_OUTPUT_UUID,      ml_json)
+                    display.show_scan_done_page()
+                    return
+
+                # --- Step 1: Predict and rank top 5 crops (no confidence filter — pass all to app) ---
                 probas = rfc.predict_proba(features)[0]
                 top5_indices = np.argsort(probas)[::-1][:5]
                 
                 crops = []
-                for idx in top5_indices:
-                    if probas[idx] > 0:
-                        crops.append({
-                            "name": str(le_crop.classes_[idx]),
-                            "match": round(float(probas[idx] * 100), 2)
-                        })
+                for rank, idx in enumerate(top5_indices, start=1):
+                    prob = float(probas[idx])
+                    crops.append({
+                        "name": str(le_crop.classes_[idx]),
+                        "match": round(prob * 100, 2),
+                        "tier": tier_map.get(rank, 'SUITABLE')
+                    })
                 
-                # Check thresholds for flags and deficiencies
+                # --- Step 2: Crop match is always true if model ran ---
+                has_crop_match = len(crops) > 0
+                
+                # --- Step 3: Always compute soil health flags and rehab recommendations ---
                 ml_flags = []
                 ml_deficiencies = {}
                 rehab = []
@@ -400,24 +443,25 @@ class StrataBLEServer:
                     if p_val < thresholds.get('p', {}).get('min', 0): ml_deficiencies['P'] = int(thresholds['p']['min'] - p_val)
                     if k_val < thresholds.get('k', {}).get('min', 0): ml_deficiencies['K'] = int(thresholds['k']['min'] - k_val)
                     
-                    ph_min = thresholds.get('ph', {}).get('min', 6.0)
-                    ph_max = thresholds.get('ph', {}).get('max', 7.0)
-                    if ph_val < ph_min: ml_flags.append("High Acidity")
-                    elif ph_val > ph_max: ml_flags.append("High Alkalinity")
+                    ph_opt_low = thresholds.get('ph', {}).get('optimal_low', 4.9)
+                    ph_opt_high = thresholds.get('ph', {}).get('optimal_high', 8.0)
+                    if ph_val < ph_opt_low: ml_flags.append("High Acidity")
+                    elif ph_val > ph_opt_high: ml_flags.append("High Alkalinity")
                     
-                    ec_min = thresholds.get('ec', {}).get('min', 0.4)
-                    ec_max = thresholds.get('ec', {}).get('max', 2.0)
-                    if ec_val < ec_min: ml_flags.append("Low EC")
-                    elif ec_val > ec_max: ml_flags.append("High EC")
-                
-                if 'N' in ml_deficiencies: rehab.append("FPJ")
-                if 'P' in ml_deficiencies: rehab.append("CalPhos")
-                if 'K' in ml_deficiencies: rehab.append("FFJ")
-                if ml_flags: rehab.append("LABS")
-                if crops and 'IMO' not in rehab: rehab.append("IMO")
+                    ec_opt_low = thresholds.get('ec', {}).get('optimal_low', 56)
+                    ec_opt_high = thresholds.get('ec', {}).get('optimal_high', 255)
+                    if ec_val < ec_opt_low: ml_flags.append("Low EC")
+                    elif ec_val > ec_opt_high: ml_flags.append("High EC")
+                    
+                    if 'N' in ml_deficiencies: rehab.append("FPJ")
+                    if 'P' in ml_deficiencies: rehab.append("CalPhos")
+                    if 'K' in ml_deficiencies: rehab.append("FFJ")
+                    if ml_flags: rehab.append("LABS")
+                    if not rehab: rehab.append("IMO")
                 
                 output_dict = {
                     "crops": crops,
+                    "has_crop_match": has_crop_match,
                     "soil_type": "any",
                     "ml_flags": ml_flags,
                     "ml_deficiencies": ml_deficiencies,
@@ -500,39 +544,48 @@ class StrataBLEServer:
         # 2. Perform 10 scans (2s interval)
         data = await self._perform_averaged_scan(num_scans=10, interval=2.0)
         
-        # 3. Predict health using ML (Default 'any' soil type)
+        # 3. Predict health using ML — crop match drives the decision
         is_healthy = False
         if model_bundle is not None:
             try:
                 le_soil = model_bundle['le_soil']
-                thresholds = model_bundle.get('thresholds', {})
+                rfc = model_bundle['model']
+                confidence_floor = model_bundle.get('crop_confidence_floor', 0.1)
                 
+                soil_encoded = le_soil.transform(['any'])[0]
                 n_val = float(data.get("nitrogen", 0)) if data.get("nitrogen") != "Err" else 0.0
                 p_val = float(data.get("phosphorus", 0)) if data.get("phosphorus") != "Err" else 0.0
                 k_val = float(data.get("potassium", 0)) if data.get("potassium") != "Err" else 0.0
+                t_val = float(data.get("temp", 0)) if data.get("temp") != "Err" else 0.0
+                m_val = float(data.get("moisture", 0)) if data.get("moisture") != "Err" else 0.0
                 ph_val = float(data.get("ph", 0)) if data.get("ph") != "Err" else 0.0
                 ec_val = float(data.get("ec", 0)) if data.get("ec") != "Err" else 0.0
                 
-                ml_flags = []
-                ml_deficiencies = []
-                
-                if thresholds:
-                    if n_val < thresholds.get('n', {}).get('min', 0): ml_deficiencies.append("N")
-                    if p_val < thresholds.get('p', {}).get('min', 0): ml_deficiencies.append("P")
-                    if k_val < thresholds.get('k', {}).get('min', 0): ml_deficiencies.append("K")
+                # --- Pre-flight: physical impossibility checks ---
+                # Each rule is independently sufficient to veto the scan.
+                # These values cannot appear in real soil — they indicate sensor failure.
+                invalid_reasons = []
+                if ec_val == 0.0:
+                    invalid_reasons.append("EC=0 (sensor not reading)")
+                if ph_val < 3.0:  # pH 0-2.9 is physically impossible for soil
+                    invalid_reasons.append(f"pH={ph_val} (below minimum 3.0 - sensor error)")
+                if n_val == 0.0 and p_val == 0.0 and k_val == 0.0:
+                    invalid_reasons.append("NPK all zero")
+                if t_val < 5.0:  # <5°C unrealistic for agricultural soil
+                    invalid_reasons.append(f"Temp={t_val}C (below minimum 5C - sensor error)")
+
+                sensor_data_invalid = len(invalid_reasons) > 0
+
+                if sensor_data_invalid:
+                    logging.warning(f"Offline scan: sensor data invalid: {'; '.join(invalid_reasons)}. Marking as unhealthy.")
+                    is_healthy = False
+                else:
+                    features = [[n_val, p_val, k_val, t_val, m_val, ph_val, ec_val, soil_encoded]]
+                    probas = rfc.predict_proba(features)[0]
+                    top5 = np.argsort(probas)[::-1][:5]
                     
-                    ph_min = thresholds.get('ph', {}).get('min', 6.0)
-                    ph_max = thresholds.get('ph', {}).get('max', 7.0)
-                    if ph_val < ph_min: ml_flags.append("High Acidity")
-                    elif ph_val > ph_max: ml_flags.append("High Alkalinity")
-                    
-                    ec_min = thresholds.get('ec', {}).get('min', 0.4)
-                    ec_max = thresholds.get('ec', {}).get('max', 2.0)
-                    if ec_val < ec_min: ml_flags.append("Low EC")
-                    elif ec_val > ec_max: ml_flags.append("High EC")
-                
-                # Considered healthy if no flags and no deficiencies
-                is_healthy = (len(ml_flags) == 0 and len(ml_deficiencies) == 0)
+                    # Healthy = model ran successfully and returned predictions
+                    is_healthy = len(top5) > 0
             except Exception as e:
                 logging.error(f"Offline ML Prediction failed: {e}")
         
@@ -547,17 +600,19 @@ class StrataBLEServer:
         logging.info(f"Offline scan complete. Results: {data}, Healthy: {is_healthy}")
 
     async def monitor_physical_button(self):
-        logging.info("Starting physical button monitor (GPIO11)")
+        logging.info("Starting physical button monitor (GPIO11) with long-press calibration recovery")
         while True:
             try:
-                pressed = await button.wait_for_press()
-                if pressed:
-                    logging.info("Physical Scan Button Pressed!")
-                    # Only start scan if one isn't currently running
-                    # We create a task so it doesn't block the monitor loop from sleeping,
-                    # but realistically we shouldn't allow overlapping scans.
-                    # Given the simplicity, we just trigger it.
-                    await self.perform_offline_scan()
+                duration = await button.wait_for_press()
+                if duration > 0.05:
+                    if duration >= 8.0:
+                        logging.info(f"Button held for {duration:.1f}s. Triggering screen touch calibration!")
+                        await buzzer.play_error()
+                        display.trigger_touch_calibration()
+                    else:
+                        logging.info(f"Button held for {duration:.1f}s. Triggering offline scan.")
+                        # Only start scan if one isn't currently running
+                        await self.perform_offline_scan()
             except asyncio.CancelledError:
                 break
             except Exception as e:

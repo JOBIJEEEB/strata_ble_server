@@ -77,13 +77,14 @@ def show_gathering_data():
 def check_for_commands():
     if ser is not None and ser.in_waiting > 0:
         try:
-            # We add errors='ignore' so weird hex bytes don't crash the decoder
-            incoming_data = ser.readline().decode('utf-8', errors='ignore').strip()
-            
-            if incoming_data:
-                logging.info(f"RAW DATA FROM SCREEN: '{incoming_data}'")
-                
-            return incoming_data
+            # Read all available bytes from the buffer immediately without blocking
+            raw_bytes = ser.read(ser.in_waiting)
+            if raw_bytes:
+                logging.info(f"RAW BYTES FROM SCREEN (HEX): {raw_bytes.hex()}")
+                incoming_data = raw_bytes.decode('utf-8', errors='ignore').strip()
+                if incoming_data:
+                    logging.info(f"RAW DATA FROM SCREEN: '{incoming_data}'")
+                return incoming_data
         except Exception as e:
             logging.error(f"Serial read error: {e}")
     return None
@@ -130,5 +131,8 @@ def show_raw_scan_results(data, is_healthy):
     else:
         send_nextion_command('status.txt="Unhealthy"')
         send_nextion_command('status.bco=63488')
+
+def trigger_touch_calibration():
+    send_nextion_command('touch_j')
 
 initialize_display()
