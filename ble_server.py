@@ -352,6 +352,7 @@ class StrataBLEServer:
         # 2. Perform 10 scans with 2s intervals (total ~20s)
         data = await self._perform_averaged_scan(num_scans=10, interval=2.0)
         
+        
         # 3. Play the buzzer finish scan melody
         await buzzer.play_finish_scan()
         
@@ -379,7 +380,6 @@ class StrataBLEServer:
                 
                 features = [[n_val, p_val, k_val, t_val, m_val, ph_val, ec_val, soil_encoded]]
 
-                # --- Pre-flight: physical impossibility checks ---
                 # --- Pre-flight checks ---
                 # Path A: Empty soil reading — NPK, EC, and Moisture all zero.
                 #         Sensor is likely not inserted or chamber is empty.
@@ -389,7 +389,13 @@ class StrataBLEServer:
                     and ec_val == 0.0 and m_val == 0.0
                 )
 
-                # Path B: Hard sensor error — physically impossible values.
+                # Path B: Any NPK parameter is zero (nutrient gap) → rehab required.
+                npk_has_zero = (n_val == 0.0 or p_val == 0.0 or k_val == 0.0)
+
+                # Path C: Moisture is zero → strict rehab regardless of NPK values.
+                moisture_zero = (m_val == 0.0)
+
+                # Path D: Hard sensor error — physically impossible values.
                 hard_error_reasons = []
                 if ph_val < 3.0:
                     hard_error_reasons.append(f"pH={ph_val} (below minimum 3.0 — sensor error)")
@@ -409,6 +415,72 @@ class StrataBLEServer:
                     }
                     ml_json = json.dumps(output_dict)
                     logging.info(f"ML Output (empty reading): {ml_json}")
+                    self.update_char(SOIL_PH_UUID,        data["ph"])
+                    self.update_char(SOIL_MOISTURE_UUID,  data["moisture"])
+                    self.update_char(SOIL_TEMP_UUID,      data["temp"])
+                    self.update_char(EC_LEVEL_UUID,       data["ec"])
+                    self.update_char(NITROGEN_UUID,       data["nitrogen"])
+                    self.update_char(PHOSPHORUS_UUID,     data["phosphorus"])
+                    self.update_char(POTASSIUM_UUID,      data["potassium"])
+                    self.update_char(ML_OUTPUT_UUID,      ml_json)
+                    display.show_scan_done_page()
+                    return
+
+                if moisture_zero:
+                    # Moisture = 0 overrides everything — strictly send to rehab.
+                    logging.warning("Moisture is 0. Strict rehab override triggered regardless of NPK values.")
+                    rehab_recs = ["WATER"]
+                    if npk_has_zero:
+                        if n_val == 0.0: rehab_recs.append("FPJ")
+                        if p_val == 0.0: rehab_recs.append("CalPhos")
+                        if k_val == 0.0: rehab_recs.append("FFJ")
+                    output_dict = {
+                        "crops": [],
+                        "has_crop_match": False,
+                        "soil_type": "any",
+                        "ml_flags": ["Dry Soil", "Nutrient deficiency detected"] if npk_has_zero else ["Dry Soil"],
+                        "ml_subtext": "Moisture level is zero. The soil must be watered before a reliable crop recommendation can be made.",
+                        "ml_deficiencies": {
+                            k: 0 for k in (["N"] if n_val == 0.0 else []) +
+                                          (["P"] if p_val == 0.0 else []) +
+                                          (["K"] if k_val == 0.0 else [])
+                        },
+                        "rehab": list(dict.fromkeys(rehab_recs))  # deduplicate, preserve order
+                    }
+                    ml_json = json.dumps(output_dict)
+                    logging.info(f"ML Output (moisture zero): {ml_json}")
+                    self.update_char(SOIL_PH_UUID,        data["ph"])
+                    self.update_char(SOIL_MOISTURE_UUID,  data["moisture"])
+                    self.update_char(SOIL_TEMP_UUID,      data["temp"])
+                    self.update_char(EC_LEVEL_UUID,       data["ec"])
+                    self.update_char(NITROGEN_UUID,       data["nitrogen"])
+                    self.update_char(PHOSPHORUS_UUID,     data["phosphorus"])
+                    self.update_char(POTASSIUM_UUID,      data["potassium"])
+                    self.update_char(ML_OUTPUT_UUID,      ml_json)
+                    display.show_scan_done_page()
+                    return
+
+                if npk_has_zero and not moisture_zero:
+                    # At least one NPK is zero — soil has nutrient gap, route to rehab.
+                    # Order: IMO → WATER → FPJ / CalPhos / FFJ (per missing nutrient)
+                    logging.warning(f"NPK has zero value (N={n_val}, P={p_val}, K={k_val}). Routing to rehab.")
+                    npk_flags = {}
+                    npk_treatments = []
+                    if n_val == 0.0: npk_treatments.append("FPJ");    npk_flags["N"] = 0
+                    if p_val == 0.0: npk_treatments.append("CalPhos"); npk_flags["P"] = 0
+                    if k_val == 0.0: npk_treatments.append("FFJ");    npk_flags["K"] = 0
+                    rehab_recs = ["IMO", "WATER"] + npk_treatments
+                    output_dict = {
+                        "crops": [],
+                        "has_crop_match": False,
+                        "soil_type": "any",
+                        "ml_flags": ["Nutrient deficiency detected"],
+                        "ml_subtext": "One or more NPK values are zero. Soil rehabilitation is required before a reliable crop recommendation can be made.",
+                        "ml_deficiencies": npk_flags,
+                        "rehab": rehab_recs
+                    }
+                    ml_json = json.dumps(output_dict)
+                    logging.info(f"ML Output (NPK zero): {ml_json}")
                     self.update_char(SOIL_PH_UUID,        data["ph"])
                     self.update_char(SOIL_MOISTURE_UUID,  data["moisture"])
                     self.update_char(SOIL_TEMP_UUID,      data["temp"])
@@ -597,11 +669,17 @@ class StrataBLEServer:
                 empty_reading = (n_val == 0.0 and p_val == 0.0 and k_val == 0.0
                                  and ec_val == 0.0 and m_val == 0.0)
 
-                # Path B — hard sensor error: physically impossible values
+                # Path B — any NPK is zero → nutrient gap, unhealthy
+                npk_has_zero = (n_val == 0.0 or p_val == 0.0 or k_val == 0.0)
+
+                # Path C — moisture is zero → strictly unhealthy regardless of NPK
+                moisture_zero = (m_val == 0.0)
+
+                # Path D — hard sensor error: physically impossible values
                 hard_error = ph_val < 3.0 or t_val < 5.0
 
-                if empty_reading or hard_error:
-                    logging.warning(f"Offline scan: sensor data invalid (empty={empty_reading}, hard_error={hard_error}). Marking as unhealthy.")
+                if empty_reading or hard_error or moisture_zero or npk_has_zero:
+                    logging.warning(f"Offline scan: soil not viable (empty={empty_reading}, hard_error={hard_error}, moisture_zero={moisture_zero}, npk_has_zero={npk_has_zero}). Marking as unhealthy.")
                     is_healthy = False
                 else:
                     features = [[n_val, p_val, k_val, t_val, m_val, ph_val, ec_val, soil_encoded]]
